@@ -1,0 +1,410 @@
+name: Build LUI TV Launcher APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Generate LUI TV Android project
+        shell: bash
+        run: |
+          set -e
+          rm -rf proj
+          mkdir -p proj/app/src/main/java/com/iptv/glass
+          mkdir -p proj/app/src/main/res/drawable
+          mkdir -p proj/app/src/main/res/values
+          cd proj
+
+          cat > settings.gradle <<'EOF_SETTINGS'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name = 'LUI-TV'
+          include ':app'
+          EOF_SETTINGS
+
+          cat > build.gradle <<'EOF_ROOT'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF_ROOT
+
+          cat > gradle.properties <<'EOF_PROPERTIES'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          EOF_PROPERTIES
+
+          cat > app/build.gradle <<'EOF_APP'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.iptv.glass'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.iptv.glass'
+                  minSdk 22
+                  targetSdk 28
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          EOF_APP
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF_MANIFEST'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+              <application
+                  android:label="LUI TV"
+                  android:allowBackup="false"
+                  android:hardwareAccelerated="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="landscape"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                          <category android:name="android.intent.category.HOME" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_MANIFEST
+
+          cat > app/src/main/java/com/iptv/glass/MainActivity.java <<'EOF_JAVA'
+          package com.iptv.glass;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.ApplicationInfo;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.view.KeyEvent;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.WindowManager;
+          import android.widget.HorizontalScrollView;
+          import android.widget.ImageView;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          import java.text.SimpleDateFormat;
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.Date;
+          import java.util.List;
+          import java.util.Locale;
+
+          public class MainActivity extends Activity {
+              private static final int BG = 0xFF080E1C;
+              private static final int BLUE = 0xFF39A7FF;
+              private static final String PREFS = "lui_tv_settings";
+              private LinearLayout root, content, appRow;
+              private TextView clock, sectionTitle;
+              private SharedPreferences prefs;
+              private final List<View> focusables = new ArrayList<View>();
+              private final List<AppEntry> apps = new ArrayList<AppEntry>();
+              private int selected = 0;
+
+              private static class AppEntry {
+                  String label, packageName;
+                  android.graphics.drawable.Drawable icon;
+                  AppEntry(String l, String p, android.graphics.drawable.Drawable i) { label=l; packageName=p; icon=i; }
+              }
+
+              private int dp(float value) {
+                  return (int)(value * getResources().getDisplayMetrics().density + 0.5f);
+              }
+
+              private GradientDrawable panel(int radius, int alpha, boolean outline) {
+                  GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                          new int[]{Color.argb(alpha, 255, 255, 255), Color.argb(Math.max(8, alpha / 3), 255, 255, 255)});
+                  d.setCornerRadius(dp(radius));
+                  if (outline) d.setStroke(dp(1), 0x35FFFFFF);
+                  return d;
+              }
+
+              private GradientDrawable background() {
+                  GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                          new int[]{0xFF101D35, 0xFF090F20, 0xFF101A31});
+                  return d;
+              }
+
+              @Override public void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+                  buildScreen();
+                  loadApps();
+                  showApps();
+                  updateClock();
+              }
+
+              private void buildScreen() {
+                  root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(dp(34), dp(18), dp(34), dp(16));
+                  root.setBackgroundDrawable(background());
+
+                  LinearLayout top = new LinearLayout(this);
+                  top.setGravity(Gravity.CENTER_VERTICAL);
+                  TextView brand = text("LUI TV", 27, Color.WHITE, true);
+                  brand.setLetterSpacing(0.08f);
+                  top.addView(brand, new LinearLayout.LayoutParams(dp(150), dp(48)));
+
+                  LinearLayout nav = new LinearLayout(this);
+                  nav.setGravity(Gravity.CENTER);
+                  nav.setPadding(dp(10), dp(5), dp(10), dp(5));
+                  nav.setBackgroundDrawable(panel(28, 34, true));
+                  String[] tabs = {"Home", "Movies", "TV Shows", "Apps", "Library"};
+                  for (String tab : tabs) {
+                      TextView item = text(tab, 14, tab.equals("Home") ? Color.WHITE : 0xBFFFFFFF, tab.equals("Home"));
+                      item.setGravity(Gravity.CENTER);
+                      item.setPadding(dp(16), dp(9), dp(16), dp(9));
+                      nav.addView(item);
+                  }
+                  LinearLayout.LayoutParams navParams = new LinearLayout.LayoutParams(0, dp(48), 1);
+                  navParams.leftMargin = dp(10);
+                  navParams.rightMargin = dp(10);
+                  top.addView(nav, navParams);
+
+                  TextView search = text("⌕", 27, Color.WHITE, false);
+                  search.setGravity(Gravity.CENTER);
+                  top.addView(search, new LinearLayout.LayoutParams(dp(42), dp(48)));
+                  TextView settings = text("⚙", 22, Color.WHITE, false);
+                  settings.setGravity(Gravity.CENTER);
+                  top.addView(settings, new LinearLayout.LayoutParams(dp(42), dp(48)));
+                  clock = text("--:--", 15, 0xFFE7EEFF, true);
+                  clock.setGravity(Gravity.CENTER);
+                  clock.setPadding(dp(12), 0, dp(12), 0);
+                  clock.setBackgroundDrawable(panel(22, 42, true));
+                  top.addView(clock, new LinearLayout.LayoutParams(dp(88), dp(40)));
+                  root.addView(top, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)));
+
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.setFillViewport(true);
+                  scroll.setVerticalScrollBarEnabled(false);
+                  content = new LinearLayout(this);
+                  content.setOrientation(LinearLayout.VERTICAL);
+                  content.setPadding(0, dp(14), 0, dp(8));
+                  scroll.addView(content);
+                  root.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+                  LinearLayout heroRow = new LinearLayout(this);
+                  heroRow.setOrientation(LinearLayout.HORIZONTAL);
+                  heroRow.addView(hero("WELCOME TO LUI TV", "Your entertainment space", "Explore your installed apps", 0xFF173B66), weighted(1, dp(178)));
+                  View gap = new View(this);
+                  heroRow.addView(gap, new LinearLayout.LayoutParams(dp(14), 1));
+                  heroRow.addView(hero("YOUR BIG SCREEN", "A beautiful home for your TV", "Fast • Simple • Designed for remote", 0xFF26345D), weighted(1, dp(178)));
+                  content.addView(heroRow);
+
+                  LinearLayout heading = new LinearLayout(this);
+                  heading.setGravity(Gravity.CENTER_VERTICAL);
+                  heading.setPadding(dp(2), dp(17), dp(2), dp(9));
+                  sectionTitle = text("My Apps", 21, Color.WHITE, true);
+                  heading.addView(sectionTitle, new LinearLayout.LayoutParams(0, dp(32), 1));
+                  TextView all = text("INSTALLED APPLICATIONS", 10, 0x99DDE8FF, true);
+                  heading.addView(all);
+                  content.addView(heading);
+
+                  HorizontalScrollView appScroll = new HorizontalScrollView(this);
+                  appScroll.setHorizontalScrollBarEnabled(false);
+                  appRow = new LinearLayout(this);
+                  appRow.setOrientation(LinearLayout.HORIZONTAL);
+                  appRow.setPadding(dp(3), dp(8), dp(3), dp(12));
+                  appScroll.addView(appRow);
+                  content.addView(appScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(126)));
+
+                  LinearLayout bottomHeading = new LinearLayout(this);
+                  bottomHeading.setGravity(Gravity.CENTER_VERTICAL);
+                  bottomHeading.setPadding(dp(2), dp(5), dp(2), dp(8));
+                  bottomHeading.addView(text("Continue Watching", 19, Color.WHITE, true));
+                  content.addView(bottomHeading);
+                  LinearLayout posters = new LinearLayout(this);
+                  posters.setOrientation(LinearLayout.HORIZONTAL);
+                  posters.addView(poster("Recently opened", "Pick up where you left off", 0xFF263D5C), weighted(1, dp(92)));
+                  View spacer = new View(this);
+                  posters.addView(spacer, new LinearLayout.LayoutParams(dp(12), 1));
+                  posters.addView(poster("Your favourites", "Your saved applications", 0xFF40315C), weighted(1, dp(92)));
+                  posters.addView(spacer(), new LinearLayout.LayoutParams(dp(12), 1));
+                  posters.addView(poster("Discover", "Explore apps on your TV", 0xFF244B50), weighted(1, dp(92)));
+                  content.addView(posters);
+                  setContentView(root);
+              }
+
+              private View spacer() { return new View(this); }
+
+              private LinearLayout.LayoutParams weighted(float weight, int height) {
+                  return new LinearLayout.LayoutParams(0, height, weight);
+              }
+
+              private TextView text(String value, int size, int color, boolean bold) {
+                  TextView t = new TextView(this);
+                  t.setText(value);
+                  t.setTextSize(size);
+                  t.setTextColor(color);
+                  if (bold) t.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                  t.setGravity(Gravity.CENTER_VERTICAL);
+                  return t;
+              }
+
+              private View hero(String eyebrow, String title, String subtitle, int color) {
+                  LinearLayout card = new LinearLayout(this);
+                  card.setOrientation(LinearLayout.VERTICAL);
+                  card.setGravity(Gravity.BOTTOM);
+                  card.setPadding(dp(25), dp(18), dp(25), dp(18));
+                  GradientDrawable gd = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                          new int[]{color, 0xFF101A32});
+                  gd.setCornerRadius(dp(18));
+                  gd.setStroke(dp(1), 0x40FFFFFF);
+                  card.setBackgroundDrawable(gd);
+                  TextView e = text(eyebrow, 10, 0xFFB8D9FF, true);
+                  TextView h = text(title, 22, Color.WHITE, true);
+                  TextView s = text(subtitle, 12, 0xDDEAF1FF, false);
+                  card.addView(e);
+                  card.addView(h);
+                  card.addView(s);
+                  return card;
+              }
+
+              private View poster(String title, String subtitle, int color) {
+                  LinearLayout p = new LinearLayout(this);
+                  p.setOrientation(LinearLayout.VERTICAL);
+                  p.setGravity(Gravity.BOTTOM);
+                  p.setPadding(dp(15), dp(10), dp(15), dp(10));
+                  GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                          new int[]{color, 0xFF11182B});
+                  d.setCornerRadius(dp(13));
+                  d.setStroke(dp(1), 0x30FFFFFF);
+                  p.setBackgroundDrawable(d);
+                  p.addView(text(title, 15, Color.WHITE, true));
+                  p.addView(text(subtitle, 10, 0xCCFFFFFF, false));
+                  return p;
+              }
+
+              private void loadApps() {
+                  apps.clear();
+                  PackageManager pm = getPackageManager();
+                  Intent query = new Intent(Intent.ACTION_MAIN, null);
+                  query.addCategory(Intent.CATEGORY_LAUNCHER);
+                  List<ResolveInfo> found = pm.queryIntentActivities(query, 0);
+                  for (ResolveInfo info : found) {
+                      String pkg = info.activityInfo.packageName;
+                      if (pkg.equals(getPackageName())) continue;
+                      String label = info.loadLabel(pm).toString();
+                      apps.add(new AppEntry(label, pkg, info.loadIcon(pm)));
+                  }
+                  Collections.sort(apps, (a, b) -> a.label.compareToIgnoreCase(b.label));
+              }
+
+              private void showApps() {
+                  appRow.removeAllViews();
+                  focusables.clear();
+                  if (apps.isEmpty()) {
+                      TextView empty = text("No launchable apps found", 15, 0xCCFFFFFF, false);
+                      appRow.addView(empty);
+                      return;
+                  }
+                  for (final AppEntry app : apps) {
+                      LinearLayout tile = new LinearLayout(this);
+                      tile.setOrientation(LinearLayout.VERTICAL);
+                      tile.setGravity(Gravity.CENTER);
+                      tile.setFocusable(true);
+                      tile.setFocusableInTouchMode(true);
+                      tile.setPadding(dp(12), dp(10), dp(12), dp(8));
+                      tile.setBackgroundDrawable(panel(15, 35, true));
+                      ImageView icon = new ImageView(this);
+                      icon.setImageDrawable(app.icon);
+                      tile.addView(icon, new LinearLayout.LayoutParams(dp(48), dp(48)));
+                      TextView name = text(app.label, 12, Color.WHITE, true);
+                      name.setGravity(Gravity.CENTER);
+                      name.setSingleLine(true);
+                      name.setPadding(0, dp(5), 0, 0);
+                      tile.addView(name, new LinearLayout.LayoutParams(dp(104), dp(24)));
+                      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(126), dp(106));
+                      lp.rightMargin = dp(12);
+                      appRow.addView(tile, lp);
+                      focusables.add(tile);
+                      tile.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+                          public void onFocusChange(View v, boolean hasFocus) {
+                              if (hasFocus) {
+                                  v.setScaleX(1.07f);
+                                  v.setScaleY(1.07f);
+                                  v.setBackgroundDrawable(focusPanel());
+                              } else {
+                                  v.setScaleX(1.0f);
+                                  v.setScaleY(1.0f);
+                                  v.setBackgroundDrawable(panel(15, 35, true));
+                              }
+                          }
+                      });
+                      tile.setOnClickListener(new View.OnClickListener() {
+                          public void onClick(View v) {
+                              Intent launch = getPackageManager().getLaunchIntentForPackage(app.packageName);
+                              if (launch != null) startActivity(launch);
+                              else Toast.makeText(MainActivity.this, "App cannot be opened", Toast.LENGTH_SHORT).show();
+                          }
+                      });
+                  }
+                  if (appRow.getChildCount() > 0) appRow.getChildAt(0).requestFocus();
+              }
+
+              private GradientDrawable focusPanel() {
+                  GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                          new int[]{0x663C9DFF, 0x33305E99});
+                  d.setCornerRadius(dp(15));
+                  d.setStroke(dp(2), BLUE);
+                  return d;
+              }
+
+              private void updateClock() {
+                  if (clock != null) clock.setText(new SimpleDateFormat("hh:mm a", Locale.getDefault()).format(new Date()));
+                  clock.postDelayed(new Runnable() { public void run() { updateClock(); } }, 30000);
+              }
+
+              @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
+                  if (keyCode == KeyEvent.KEYCODE_BACK) return super.onKeyDown(keyCode, event);
+                  return super.onKeyDown(keyCode, event);
+              }
+          }
+          EOF_JAVA
+
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
+        working-directory: proj
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LUI-TV-APK
+          path: proj/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
